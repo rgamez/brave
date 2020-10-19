@@ -25,17 +25,23 @@ import com.p6spy.engine.spy.option.P6OptionsRepository;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 
-import junitparams.JUnitParamsRunner;
-import junitparams.Parameters;
-import junitparams.naming.TestCaseName;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameter;
+import org.junit.runners.Parameterized.Parameters;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoJUnitRunner;
 import org.mockito.junit.MockitoRule;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -43,9 +49,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-@RunWith(JUnitParamsRunner.class)
+@RunWith(MockitoJUnitRunner.class)
 public class TracingJdbcEventListenerTest {
-  @Rule public MockitoRule rule = MockitoJUnit.rule();
   @Mock Connection connection;
   @Mock DatabaseMetaData metaData;
   @Mock StatementInformation statementInformation;
@@ -128,34 +133,6 @@ public class TracingJdbcEventListenerTest {
     verify(span).remoteIpAndPort("1.2.3.4", 5555);
   }
 
-  @Test
-  @TestCaseName("remoteServiceName should be '{1}'")
-  @Parameters({
-    "?zipkinServiceName=myDatabase&foo=bar, myDatabase",
-    "?zipkinServiceName=my_database&foo=bar, my_database",
-    "?zipkinServiceName=my-database&foo=bar, my-database",
-    "?zipkinServiceName=my-database-1&foo=bar, my-database-1",
-    "?zipkinServiceName=my.database&foo=bar, my.database",
-    "?zipkinServiceName=my.database&foo=bar, my.database",
-    "?zipkinServiceName=my-database:5432&foo=bar, my-database:5432",
-    "?zipkinServiceName=my-database@localhost&foo=bar, my-database@localhost",
-    "?zipkinServiceName=my-database, my-database",
-    "?zipkinServiceName=my-database-1&zipkinServiceName=my-database-2, my-database-1",
-    "?zipkinServiceName=, default",
-    "?zipkinServiceName=&, default",
-    ",default"
-  })
-  public void parseServerIpAndPort_overridesRemoteServiceNameFromUrlParameter(String queryString, String remoteServiceName) throws SQLException {
-    when(connection.getMetaData()).thenReturn(metaData);
-    when(metaData.getURL()).thenReturn(url + queryString);
-
-    new TracingJdbcEventListener("default", false, logOptions)
-      .parseServerIpAndPort(connection, span);
-
-    verify(span).remoteServiceName(remoteServiceName);
-    verify(span).remoteIpAndPort("1.2.3.4", 5555);
-  }
-
   @Test public void parseServerIpAndPort_doesntCrash() throws SQLException {
     when(connection.getMetaData()).thenThrow(new SQLException());
 
@@ -210,6 +187,70 @@ public class TracingJdbcEventListenerTest {
       listener.onAfterAnyExecute(statementInformation, 1, null);
     } finally {
       parent.finish();
+    }
+  }
+
+  @RunWith(Parameterized.class)
+  public static class ParameterizedTests {
+
+    @Rule public MockitoRule rule = MockitoJUnit.rule();
+
+    String url = "jdbc:mysql://1.2.3.4:5555/mydatabase";
+
+    @Mock Connection connection;
+    @Mock DatabaseMetaData metaData;
+    @Mock Span span;
+    P6OptionsRepository p6OptionsRepository;
+    P6LogOptions logOptions;
+
+    StrictCurrentTraceContext currentTraceContext = StrictCurrentTraceContext.create();
+    TestSpanHandler spans = new TestSpanHandler();
+    Tracing tracing = Tracing.newBuilder()
+      .currentTraceContext(currentTraceContext).addSpanHandler(spans).build();
+
+    @Parameter
+    public String queryString;
+    @Parameter(1)
+    public String remoteServiceName;
+
+    @Parameters(name = "should be \"{1}\"")
+    public static Collection<Object[]> values() {
+      return Arrays.asList(new Object[][] {
+        { "?zipkinServiceName=myDatabase&foo=bar", "myDatabase" },
+        { "?zipkinServiceName=my_database&foo=bar", "my_database" },
+        { "?zipkinServiceName=my-database&foo=bar", "my-database" },
+        { "?zipkinServiceName=my-database-1&foo=bar", "my-database-1" },
+        { "?zipkinServiceName=my.database&foo=bar", "my.database" },
+        { "?zipkinServiceName=my-database:5432&foo=bar", "my-database:5432" },
+        { "?zipkinServiceName=my-database@localhost&foo=bar", "my-database@localhost" },
+        { "?zipkinServiceName=my-database", "my-database" },
+        { "?zipkinServiceName=my-database-1&zipkinServiceName=my-database-2", "my-database-1" },
+        { "?zipkinServiceName=", "defaultRemoteServiceName" },
+        { "?zipkinServiceName=&", "defaultRemoteServiceName" },
+        { null, "defaultRemoteServiceName"}
+      });
+    }
+
+    @Before public void init() {
+      p6OptionsRepository = new P6OptionsRepository();
+      logOptions = new P6LogOptions(p6OptionsRepository);
+      logOptions.load(logOptions.getDefaults());
+      p6OptionsRepository.initCompleted();
+    }
+
+    @After public void close() {
+      tracing.close();
+      currentTraceContext.close();
+    }
+
+    @Test public void parseServerIpAndPort_overridesRemoteServiceNameFromUrlParameter() throws SQLException {
+      when(connection.getMetaData()).thenReturn(metaData);
+      when(metaData.getURL()).thenReturn(url + queryString);
+      new TracingJdbcEventListener("defaultRemoteServiceName", false, logOptions)
+        .parseServerIpAndPort(connection, span);
+
+      verify(span).remoteServiceName(remoteServiceName);
+      verify(span).remoteIpAndPort("1.2.3.4", 5555);
     }
   }
 }
